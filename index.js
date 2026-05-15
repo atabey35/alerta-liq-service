@@ -8,7 +8,7 @@ const server = http.createServer(app);
 
 const MAIN_BACKEND_URL = 'https://alertachart-backend-production.up.railway.app/api/webhooks/fast-listing';
 const MAIN_BACKEND_HISTORY_URL = 'https://alertachart-backend-production.up.railway.app/api/exchange-listings';
-const WEBHOOK_SECRET = 'SUPER_SECRET_ALERTA_KEY_2026';
+const WEBHOOK_SECRET = 'd0cc02ad4e52771cb9419aefbf4f35474e7010047c6894590d8e21ceb9fb692f';
 
 const io = new Server(server, {
   cors: {
@@ -23,6 +23,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 8080;
 
 let recentListings = [];
+let recentLiquidations = []; // Likidasyon hafızası
 
 // Borsalarin durumunu takip eden basit bir yapi
 const exchangeStatuses = {
@@ -49,7 +50,7 @@ async function hydrateFromMainBackend() {
   }
 }
 
-// 1. WEBHOOK (DO Botu veriyi buraya yollar)
+// 1. WEBHOOK (Listeleme Botu veriyi buraya yollar)
 app.post('/api/webhooks/fast-listing', async (req, res) => {
   const secret = req.headers['x-webhook-secret'];
   
@@ -87,10 +88,10 @@ app.post('/api/webhooks/fast-listing', async (req, res) => {
     recentListings.length = 50;
   }
   
-  // ADIM 1: Saniyede Frontend'deki kullanicilara yolla (Gorsel olarak aninda gorsunler)
+  // Saniyede Frontend'deki kullanicilara yolla
   io.emit('NEW_LISTING_EVENT', listingData);
   
-  // ADIM 2: Arka planda ana backende ilet (Push notification gitsin ve DB'ye kaydolsun)
+  // Arka planda ana backende ilet
   fetch(MAIN_BACKEND_URL, {
     method: 'POST',
     headers: {
@@ -107,7 +108,32 @@ app.post('/api/webhooks/fast-listing', async (req, res) => {
   res.status(200).json({ success: true, message: 'Broadcasted to Socket and forwarded to Main Backend' });
 });
 
-// 2. HISTORY API
+// 2. WEBHOOK (Likidasyon Botu veriyi buraya yollar)
+app.post('/api/webhooks/liquidation', async (req, res) => {
+  const secret = req.headers['x-webhook-secret'];
+  
+  if (secret !== WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const liqData = req.body;
+  console.log(`[LIQ VERİSİ ALINDI] ${liqData.symbol} | ${liqData.side} | $${(liqData.usdValue || 0).toLocaleString()}`);
+
+  // Hafızaya ekle
+  recentLiquidations.unshift(liqData);
+
+  // En son 100 taneyi tut
+  if (recentLiquidations.length > 100) {
+    recentLiquidations.length = 100;
+  }
+
+  // Socket.io ile canlı akışa fırlat (Tüm bağlı ekranlar için)
+  io.emit('NEW_LIQUIDATION_EVENT', liqData);
+
+  res.status(200).json({ success: true, message: 'Broadcasted liquidation event' });
+});
+
+// 3. HISTORY LISTINGS API
 app.get('/api/exchange-listings', (req, res) => {
   const now = new Date();
   const statusesArray = Object.values(exchangeStatuses).map(status => ({
@@ -123,20 +149,31 @@ app.get('/api/exchange-listings', (req, res) => {
   });
 });
 
+// 4. HISTORY LIQUIDATIONS API
+app.get('/api/liquidations', (req, res) => {
+  res.status(200).json({
+    success: true,
+    events: recentLiquidations
+  });
+});
+
 app.get('/', (req, res) => {
-  res.send('Alerta Listing Microservice is Running!');
+  res.send('Alerta Liq & Listing Microservice is Running!');
 });
 
 io.on('connection', (socket) => {
-  console.log('🔗 Yeni bir kullanici baglandi (Listing Socket):', socket.id);
+  console.log('🔗 Yeni bir kullanici baglandi:', socket.id);
   
+  // Yeni gelen kullanıcıya geçmiş verileri direkt yolla (opsiyonel)
+  socket.emit('INIT_LISTINGS', recentListings);
+  socket.emit('INIT_LIQUIDATIONS', recentLiquidations);
+
   socket.on('disconnect', () => {
     console.log('❌ Kullanici ayrildi:', socket.id);
   });
 });
 
 server.listen(PORT, async () => {
-  console.log(`🚀 Listing Microservice is running on port ${PORT}`);
-  // Baslarken ana backendden verileri cek
+  console.log(`🚀 Microservice is running on port ${PORT}`);
   await hydrateFromMainBackend();
 });
