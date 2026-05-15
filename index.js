@@ -24,6 +24,7 @@ const PORT = process.env.PORT || 8080;
 
 let recentListings = [];
 let recentLiquidations = []; // Likidasyon hafızası
+let latestFundingData = { updatedAt: Date.now(), topPositive: [], topNegative: [], allRates: [] }; // Canlı funding havuzu
 
 // === 📈 YÜKSEK PERFORMANSLI IN-MEMORY ROLLING STATS ===
 let minBuckets = {};  // Dakikalık hacim havuzu (15dk için)
@@ -239,6 +240,36 @@ app.post('/api/webhooks/liquidation', async (req, res) => {
   res.status(200).json({ success: true, message: 'Broadcasted liquidation event with rolling stats' });
 });
 
+// 3. WEBHOOK (Funding Botu veriyi buraya yollar)
+app.post('/api/webhooks/funding', async (req, res) => {
+  const secret = req.headers['x-webhook-secret'];
+  
+  if (secret !== WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const payload = req.body;
+  
+  // Veri tutarlılık kontrolü
+  if (payload && Array.isArray(payload.allRates)) {
+    latestFundingData = {
+      updatedAt: payload.updatedAt || Date.now(),
+      topPositive: Array.isArray(payload.topPositive) ? payload.topPositive : [],
+      topNegative: Array.isArray(payload.topNegative) ? payload.topNegative : [],
+      allRates: payload.allRates
+    };
+
+    console.log(`[FUNDING VERİSİ ALINDI] Toplam ${payload.allRates.length} sembol.`);
+
+    // Socket.io ile anında tarayıcılara ilet
+    io.emit('NEW_FUNDING_EVENT', latestFundingData);
+    
+    return res.status(200).json({ success: true, message: 'Funding data broadcasted successfully' });
+  }
+
+  res.status(400).json({ error: 'Invalid funding payload structure' });
+});
+
 // 3. HISTORY LISTINGS API
 app.get('/api/exchange-listings', (req, res) => {
   const now = new Date();
@@ -255,11 +286,11 @@ app.get('/api/exchange-listings', (req, res) => {
   });
 });
 
-// 4. HISTORY LIQUIDATIONS API
-app.get('/api/liquidations', (req, res) => {
+// 5. HISTORY FUNDING API
+app.get('/api/funding', (req, res) => {
   res.status(200).json({
     success: true,
-    events: recentLiquidations
+    data: latestFundingData
   });
 });
 
@@ -276,6 +307,7 @@ io.on('connection', (socket) => {
     history: recentLiquidations,
     rollingStats: getRollingStats()
   });
+  socket.emit('INIT_FUNDING', latestFundingData);
 
   socket.on('disconnect', () => {
     console.log('❌ Kullanici ayrildi:', socket.id);
