@@ -6,6 +6,10 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
+// Gerekli yonlendirmeler icin fetch modulunu de ekleyebiliriz. Node 18+ uzerinde global fetch var zaten.
+const MAIN_BACKEND_URL = 'https://alertachart-backend-production.up.railway.app/api/webhooks/fast-listing';
+const WEBHOOK_SECRET = 'SUPER_SECRET_ALERTA_KEY_2026';
+
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -18,44 +22,57 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 
-// Bellekte son 50 listelemeyi tutalim (Frontend acilisinda gostermek icin)
 const recentListings = [];
 
 // 1. WEBHOOK (DO Botu veriyi buraya yollar)
-app.post('/api/webhooks/fast-listing', (req, res) => {
+app.post('/api/webhooks/fast-listing', async (req, res) => {
   const secret = req.headers['x-webhook-secret'];
   
-  if (secret !== 'SUPER_SECRET_ALERTA_KEY_2026') {
+  if (secret !== WEBHOOK_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
   const listingData = req.body;
   console.log(`[YENI LISTELEME ALINDI] Borsadan gelen veri:`, listingData);
   
-  // Gelen veriyi (Eger array ise icindekileri, degilse kendisini) listeye ekle
+  // Gelen veriyi hafizaya ekle
   if (Array.isArray(listingData.events)) {
     recentListings.unshift(...listingData.events);
   } else if (listingData.id) {
     recentListings.unshift(listingData);
   }
 
-  // Listeyi max 50 elemanda tut
   if (recentListings.length > 50) {
     recentListings.length = 50;
   }
   
-  // Gelen veriyi Frontend'deki bagli butun kullanicilara saniyesinde firlat
+  // ADIM 1: Saniyede Frontend'deki kullanicilara yolla (Gorsel olarak aninda gorsunler)
   io.emit('NEW_LISTING_EVENT', listingData);
   
-  res.status(200).json({ success: true, message: 'Broadcasted listing to clients' });
+  // ADIM 2: Arka planda ana backende ilet (Push notification gitsin ve DB'ye kaydolsun)
+  // Beklemiyoruz (await etmiyoruz), arka planda gitsin ki bu responds aninda donsun!
+  fetch(MAIN_BACKEND_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-webhook-secret': WEBHOOK_SECRET
+    },
+    body: JSON.stringify(listingData)
+  }).then(response => {
+    console.log(`[Forward] Ana backend e iletildi. Durum: ${response.status}`);
+  }).catch(err => {
+    console.error(`[Forward] Ana backend e iletme HATA:`, err.message);
+  });
+  
+  res.status(200).json({ success: true, message: 'Broadcasted to Socket and forwarded to Main Backend' });
 });
 
-// 2. HISTORY API (Frontend ilk acildiginda son listelemeleri cekmesi icin)
+// 2. HISTORY API
 app.get('/api/exchange-listings', (req, res) => {
   res.status(200).json({
     latencyMs: 10,
     events: recentListings,
-    statuses: [] // Istenirse bot statuleri de buraya eklenebilir
+    statuses: []
   });
 });
 
