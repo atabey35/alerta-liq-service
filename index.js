@@ -6,10 +6,9 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io ayarları (Frontend buradan dinleyecek)
 const io = new Server(server, {
   cors: {
-    origin: '*', // Vercel'den gelen isteklere izin ver
+    origin: '*',
     methods: ['GET', 'POST']
   }
 });
@@ -19,7 +18,10 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 
-// 1. WEBHOOK (DigitalOcean Borsa Listing Botu veriyi buraya yollar)
+// Bellekte son 50 listelemeyi tutalim (Frontend acilisinda gostermek icin)
+const recentListings = [];
+
+// 1. WEBHOOK (DO Botu veriyi buraya yollar)
 app.post('/api/webhooks/fast-listing', (req, res) => {
   const secret = req.headers['x-webhook-secret'];
   
@@ -30,13 +32,33 @@ app.post('/api/webhooks/fast-listing', (req, res) => {
   const listingData = req.body;
   console.log(`[YENI LISTELEME ALINDI] Borsadan gelen veri:`, listingData);
   
-  // Gelen Borsa Listeleme verisini Frontend'deki butun kullanicilara saniyesinde firlat
+  // Gelen veriyi (Eger array ise icindekileri, degilse kendisini) listeye ekle
+  if (Array.isArray(listingData.events)) {
+    recentListings.unshift(...listingData.events);
+  } else if (listingData.id) {
+    recentListings.unshift(listingData);
+  }
+
+  // Listeyi max 50 elemanda tut
+  if (recentListings.length > 50) {
+    recentListings.length = 50;
+  }
+  
+  // Gelen veriyi Frontend'deki bagli butun kullanicilara saniyesinde firlat
   io.emit('NEW_LISTING_EVENT', listingData);
   
   res.status(200).json({ success: true, message: 'Broadcasted listing to clients' });
 });
 
-// Sadece servisin calisip calismadigini test etmek icin basit bir GET
+// 2. HISTORY API (Frontend ilk acildiginda son listelemeleri cekmesi icin)
+app.get('/api/exchange-listings', (req, res) => {
+  res.status(200).json({
+    latencyMs: 10,
+    events: recentListings,
+    statuses: [] // Istenirse bot statuleri de buraya eklenebilir
+  });
+});
+
 app.get('/', (req, res) => {
   res.send('Alerta Listing Microservice is Running!');
 });
