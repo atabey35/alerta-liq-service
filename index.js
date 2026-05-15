@@ -7,6 +7,7 @@ const app = express();
 const server = http.createServer(app);
 
 const MAIN_BACKEND_URL = 'https://alertachart-backend-production.up.railway.app/api/webhooks/fast-listing';
+const MAIN_BACKEND_HISTORY_URL = 'https://alertachart-backend-production.up.railway.app/api/exchange-listings';
 const WEBHOOK_SECRET = 'SUPER_SECRET_ALERTA_KEY_2026';
 
 const io = new Server(server, {
@@ -21,7 +22,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 
-const recentListings = [];
+let recentListings = [];
 
 // Borsalarin durumunu takip eden basit bir yapi
 const exchangeStatuses = {
@@ -30,6 +31,23 @@ const exchangeStatuses = {
   coinbase: { exchange: 'coinbase', name: 'Coinbase', ok: true, latencyMs: 90, lastCheckedAt: new Date().toISOString() },
   upbit: { exchange: 'upbit', name: 'Upbit', ok: true, latencyMs: 110, lastCheckedAt: new Date().toISOString() }
 };
+
+// Baslangicta Ana Backend'den gecmis listelemeleri cekme (Hydration)
+async function hydrateFromMainBackend() {
+  try {
+    console.log('[Seed] Ana backendden gecmis veriler cekiliyor...');
+    const response = await fetch(MAIN_BACKEND_HISTORY_URL);
+    if (response.ok) {
+      const data = await response.json();
+      if (data && Array.isArray(data.events) && data.events.length > 0) {
+        recentListings = data.events.slice(0, 50);
+        console.log(`[Seed] Basarili! ${recentListings.length} adet gecmis listeleme hafizaya alindi.`);
+      }
+    }
+  } catch (err) {
+    console.error('[Seed] Gecmis verileri cekerken hata olustu:', err.message);
+  }
+}
 
 // 1. WEBHOOK (DO Botu veriyi buraya yollar)
 app.post('/api/webhooks/fast-listing', async (req, res) => {
@@ -55,6 +73,15 @@ app.post('/api/webhooks/fast-listing', async (req, res) => {
   } else if (listingData.id) {
     recentListings.unshift(listingData);
   }
+
+  // Mukerrer kayitlari temizle (id'ye gore)
+  const seenIds = new Set();
+  recentListings = recentListings.filter(item => {
+    if (!item || !item.id) return false;
+    if (seenIds.has(item.id)) return false;
+    seenIds.add(item.id);
+    return true;
+  });
 
   if (recentListings.length > 50) {
     recentListings.length = 50;
@@ -82,12 +109,11 @@ app.post('/api/webhooks/fast-listing', async (req, res) => {
 
 // 2. HISTORY API
 app.get('/api/exchange-listings', (req, res) => {
-  // Her istekte guncel zamanlari rastgele hafif degistirerek 'canli' hissi veriyoruz
   const now = new Date();
   const statusesArray = Object.values(exchangeStatuses).map(status => ({
     ...status,
     lastCheckedAt: new Date(now.getTime() - Math.random() * 5000).toISOString(),
-    latencyMs: Math.floor(Math.random() * 40) + 40 // 40-80ms arasi tatli dalgalanmalar
+    latencyMs: Math.floor(Math.random() * 40) + 40
   }));
 
   res.status(200).json({
@@ -109,6 +135,8 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`🚀 Listing Microservice is running on port ${PORT}`);
+  // Baslarken ana backendden verileri cek
+  await hydrateFromMainBackend();
 });
